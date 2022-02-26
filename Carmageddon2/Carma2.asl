@@ -1,4 +1,17 @@
-state("CARMA2_HW") {}
+state("CARMA2_HW") {
+	int pedsCounter : "CARMA2_HW.EXE", 0x3447CC;
+	int lapsCounter : "CARMA2_HW.EXE", 0x35B944;
+	int checkpointsCounter : "CARMA2_HW.EXE", 0x361EEC;
+	byte objectivesCounter : "CARMA2_HW.EXE", 0x2BA641;
+	int missionPedsKilledCounter : "CARMA2_HW.EXE", 0x3447CC;
+	bool mapStarted : "CARMA2_HW.EXE", 0x276908;
+	bool loadingScreenVisible : "CARMA2_HW.EXE", 0x294490;
+	bool raceEnded : "CARMA2_HW.EXE", 0x2792C8;
+	bool playerDestroyed : "CARMA2_HW.EXE", 0x35BE00;
+	bool gameInitialized : "CARMA2_HW.EXE", 0x28BE34;
+	uint currentMenuScreenPointer : "CARMA2_HW.EXE", 0x288ABC;
+	//bool saveLoaded : "CARMA2_HW.EXE", 0x28BE34;
+}
 
 startup {
     vars.missions = new Dictionary<string, Dictionary<string, int>>
@@ -29,7 +42,7 @@ startup {
      {"MISSION: FAIR GRIND",        new Dictionary<string, int>() {{"Index", 23}, {"Group", 6 }}},
      {"SEAMAN SPLATTER",            new Dictionary<string, int>() {{"Index", 24}, {"Group", 7 }}},
      {"CON ROD AIR",                new Dictionary<string, int>() {{"Index", 25}, {"Group", 7 }}},
-     {"ROLL UP, ROLL OVER",         new Dictionary<string, int>() {{"Index", 26}, {"Group", 7 }}},
+     {"ROLL UP, ROLL OVER...",      new Dictionary<string, int>() {{"Index", 26}, {"Group", 7 }}},
      {"MISSION: CONTROL FREAK",     new Dictionary<string, int>() {{"Index", 27}, {"Group", 7 }}},
      {"SHEIK, RATTLE & ROLL",       new Dictionary<string, int>() {{"Index", 28}, {"Group", 8 }}},
      {"GOING DOWN",                 new Dictionary<string, int>() {{"Index", 29}, {"Group", 8 }}},
@@ -63,14 +76,26 @@ startup {
         settings.Add(entry.Key, true, entry.Key, "split_group_" + entry.Value["Group"]);
     }
 	
-	// Split on each level finished
+	// Split on each map end
 	settings.Add("split_mapEnd", false, "On any map end", "splitMode");
+
+	// Split on each map won (checks whether player car is destroyed)
+	settings.Add("split_mapWon", false, "On any map won", "splitMode");
 	
 	// Split on each lap finished
 	settings.Add("split_lap", false, "On each lap done", "splitMode");
+
+	// Split on each checkpoint reached
+	settings.Add("split_checkpoint", false, "On each checkpoint reached", "splitMode");
 	
 	// Split on each ped killed
 	settings.Add("split_peds", false, "Split on each ped killed", "splitMode");
+
+	// Split on each mission objective done
+	settings.Add("split_missionObjective", false, "On each mission objective done", "splitMode");
+
+	// Split on each mission ped killed
+	settings.Add("split_missionPeds", false, "On each mission ped killed", "splitMode");
 	
 	
 	// Run start modes
@@ -103,12 +128,6 @@ init {
         var container = new Tuple<MemoryWatcher<bool>, StringWatcher>(flagWatcher, nameWatcher);
         vars.missionWatchers.Add(container);
     }
-
-    vars.pedsWatcher = new MemoryWatcher<int>(new IntPtr(0x7447CC)) { Name = "Peds" };
-    vars.mapStartedWatcher = new MemoryWatcher<int>(new IntPtr(0x676908)) { Name = "MapStarted" };
-	vars.loadScreenWatcher = new MemoryWatcher<bool>(new IntPtr(0x694490)) { Name = "LoadingScreen" };
-	vars.raceEndedWatcher = new MemoryWatcher<bool>(new IntPtr(0x6792C8)) { Name = "RaceEnded" };
-	vars.lapsCounter = new MemoryWatcher<int>(new IntPtr(0x75B944)) { Name = "LapsCounter" };
 }
 
 update {
@@ -117,61 +136,89 @@ update {
         entry.Item1.Update(game);
         entry.Item2.Update(game);
     }
-
-    vars.pedsWatcher.Update(game);
-    vars.mapStartedWatcher.Update(game);
-	vars.loadScreenWatcher.Update(game);
-	vars.raceEndedWatcher.Update(game);
-	vars.lapsCounter.Update(game);
 }
 
 split {
-	if (settings["split_missions"]){
+	if (!current.gameInitialized)
+		return;
+
+	// Hack used to fix timer splitting on game restart after crash, we want it only to split after actual map,
+	// so usually on the cars purchase screen
+	const int menuScreenPtr = 0x5A80F0;
+	if (settings["split_missions"] && (current.currentMenuScreenPointer != menuScreenPtr && current.currentMenuScreenPointer != 0)){
 		foreach(var entry in vars.missionWatchers)
 		{
 			var name = ((string)entry.Item2.Current).Trim();
-			var watcher = entry.Item1;
-			if ((watcher.Current != watcher.Old) && (bool)watcher.Current && settings[name])
+			var finishedWatcher = entry.Item1;
+			if (finishedWatcher.Current && !finishedWatcher.Old && settings[name])
+			{
+				print("Splitting due to campaign map finish");
 				return true;
+			}
 		}
 	}    
 
-    if (settings["split_peds"])
+    if (settings["split_peds"] && current.mapStarted)
     {
-        var diff = (int)vars.pedsWatcher.Current - (int)vars.pedsWatcher.Old;
-        if (diff > 0)
+        if (current.pedsCounter - old.pedsCounter > 0)
+            return true;
+    }
+
+	if (settings["split_missionPeds"] && current.mapStarted)
+    {
+        if (current.missionPedsKilledCounter - old.missionPedsKilledCounter > 0)
+            return true;
+    }
+
+	if (settings["split_missionObjective"] && current.mapStarted)
+    {
+        if (current.objectivesCounter - old.objectivesCounter > 0)
             return true;
     }
 	
-	if (settings["split_mapEnd"])
+	if (settings["split_mapEnd"] && current.mapStarted)
 	{
-		if ((int)vars.mapStartedWatcher.Current != 0)
-		{
-			if ((bool)vars.raceEndedWatcher.Current && !(bool)vars.raceEndedWatcher.Old)
-				return true;
-		}
+		if (current.raceEnded && !old.raceEnded)
+			return true;
+	}
+
+	if (settings["split_mapWon"] && current.mapStarted)
+	{
+		if (!current.playerDestroyed && current.raceEnded && !old.raceEnded)
+			return true;
 	}
 	
-	if (settings["split_lap"])
+	if (settings["split_lap"] && current.mapStarted)
 	{
-		if ((int)vars.mapStartedWatcher.Current != 0)
-		{
-			if ((int)vars.lapsCounter.Current > (int)vars.lapsCounter.Old)
-				return true;
-		}
+		if (current.lapsCounter > old.lapsCounter)
+			return true;
+	}
+
+	if (settings["split_checkpoint"] && current.mapStarted)
+	{
+		if (current.checkpointsCounter > old.checkpointsCounter)
+			return true;
+		else if (current.checkpointsCounter == 1 && old.checkpointsCounter > 1 && current.lapsCounter > old.lapsCounter)
+			return true;
 	}
 }
 
 start {
 	if (settings["start_mapStarted"])
-		if ((int)vars.mapStartedWatcher.Current != 0 && (int)vars.mapStartedWatcher.Current != (int)vars.mapStartedWatcher.Old)
+		if (current.mapStarted && !old.mapStarted)
 			return true;
 }
 
 reset {
+	if (!current.gameInitialized)
+		return;
+
 	if (settings["reset_campaignAborted"])
 	{
-		if ((int)vars.mapStartedWatcher.Current == 0)
+		// Reset only if we're currently in the main menu, used because game crashes a lot, 
+		// and we don't want to reset timer on game start, as loading the save would cause this
+		const int menuScreenPtr = 0x5A80F0;
+		if (current.currentMenuScreenPointer == menuScreenPtr && !current.mapStarted)
 		{
 			bool anyFinished = false;
 			for (int i = 0; i<3; i++)
@@ -185,23 +232,29 @@ reset {
 			}
 
 			if (!anyFinished)
+			{
+				print("Resetting run, campaign aborted");
 				return true;
+			}
 		}
 	}   
 
 	if (settings["reset_loadingScreen"])
 	{
-		if ((int)vars.mapStartedWatcher.Current == 0)
-			if ((bool)vars.loadScreenWatcher.Current && !(bool)vars.loadScreenWatcher.Old)
+		if (!current.mapStarted)
+			if (current.loadingScreenVisible && !old.loadingScreenVisible)
 				return true;
 	}
 }
 
 isLoading {
+	if (!current.gameInitialized)
+		return;
+
 	if (!settings["loadTimeRemoval"])
 		return false;
 		
-	if ((bool)vars.loadScreenWatcher.Current)
+	if (current.loadingScreenVisible)
 		return true;
 		
 	return false;
